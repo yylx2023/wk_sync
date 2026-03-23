@@ -51,6 +51,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           cat > release_notes.md << EOF
           CLIProxyAPIPlus 原始二进制自动提取发布
@@ -67,6 +68,7 @@ jobs:
           EOF
 
           gh release create "${{ steps.meta.outputs.release_tag }}" \
+            --repo "$GH_REPO" \
             --title "${{ steps.meta.outputs.release_name }}" \
             --notes-file release_notes.md
 
@@ -139,8 +141,10 @@ jobs:
       - name: Upload binary to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release upload "${{ needs.prepare_release.outputs.release_tag }}" \
+            --repo "$GH_REPO" \
             "${{ steps.output.outputs.output_name }}" \
             "${{ steps.output.outputs.info_name }}" \
             --clobber
