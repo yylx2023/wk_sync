@@ -1,0 +1,160 @@
+# CLIProxyAPIPlus 原始二进制提取 GitHub Actions (v2)
+#
+# 功能: 从 Docker 镜像拉取 CLIProxyAPIPlus，仅提取原始二进制并上传到 GitHub Release
+#
+# 触发方式:
+#   - 手动触发 (workflow_dispatch)
+#   - 定时触发 (每周一 UTC 00:00)
+#   - Push 到 main 分支
+#
+
+name: Extract CLIProxyAPIPlus Binary v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Docker镜像地址'
+        required: false
+        default: 'agassiz/cli-proxy-api-plus:latest'
+  schedule:
+    - cron: '0 0 * * 1' # 每周一 UTC 00:00
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE: ${{ github.event.inputs.image || 'agassiz/cli-proxy-api-plus:latest' }}
+
+permissions:
+  contents: write
+
+jobs:
+  prepare_release:
+    runs-on: ubuntu-latest
+    outputs:
+      date_tag: ${{ steps.meta.outputs.date_tag }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+
+    steps:
+      - name: Set release metadata
+        id: meta
+        run: |
+          DATE_TAG=$(date +%Y%m%d)
+          RELEASE_TAG="binary-${DATE_TAG}-${GITHUB_RUN_NUMBER}"
+          RELEASE_NAME="CLIProxyAPIPlus Binary ${DATE_TAG}"
+          echo "date_tag=$DATE_TAG" >> $GITHUB_OUTPUT
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release_notes.md << EOF
+          CLIProxyAPIPlus 原始二进制自动提取发布
+
+          - 时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - 来源镜像: ${{ env.IMAGE }}
+          - 触发方式: ${{ github.event_name }}
+          - Workflow Run: ${{ github.run_number }}
+
+          附件包含:
+          - amd64 原始二进制
+          - arm64 原始二进制
+          - 对应架构的信息说明文件
+          EOF
+
+          gh release create "${{ steps.meta.outputs.release_tag }}" \
+            --title "${{ steps.meta.outputs.release_name }}" \
+            --notes-file release_notes.md
+
+  extract_binary:
+    needs: prepare_release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo file
+
+      - name: Pull Docker image with skopeo
+        run: |
+          mkdir -p work
+          cd work
+          echo "📦 Pulling image: ${{ env.IMAGE }} (arch: ${{ matrix.arch }})"
+          skopeo copy --override-arch ${{ matrix.arch }} "docker://${{ env.IMAGE }}" "dir:."
+          echo "✅ Image pulled successfully"
+
+      - name: Extract binary from largest layer
+        id: extract
+        run: |
+          cd work
+          LARGEST_BLOB=$(ls -S ./* 2>/dev/null | grep -v manifest.json | grep -v version | head -1)
+          echo "📂 Largest blob: $LARGEST_BLOB"
+          tar xf "$LARGEST_BLOB"
+
+          if [ -f "CLIProxyAPI/CLIProxyAPIPlus" ]; then
+            BINARY_PATH="CLIProxyAPI/CLIProxyAPIPlus"
+          elif [ -f "CLIProxyAPIPlus" ]; then
+            BINARY_PATH="CLIProxyAPIPlus"
+          else
+            echo "❌ Binary not found"
+            exit 1
+          fi
+
+          echo "✅ Found binary: $BINARY_PATH"
+          echo "binary_path=$BINARY_PATH" >> $GITHUB_OUTPUT
+
+      - name: Prepare output files
+        id: output
+        run: |
+          OUTPUT_NAME="CLIProxyAPIPlus_${{ needs.prepare_release.outputs.date_tag }}_${{ matrix.arch }}"
+          INFO_NAME="binary_info_${{ matrix.arch }}.txt"
+          cp "work/${{ steps.extract.outputs.binary_path }}" "$OUTPUT_NAME"
+          chmod +x "$OUTPUT_NAME"
+
+          cat > "$INFO_NAME" << EOF
+          CLIProxyAPIPlus Binary Information
+          ================================
+          Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Source Image: ${{ env.IMAGE }}
+          Architecture: ${{ matrix.arch }}
+          Output File: $OUTPUT_NAME
+          File Type: $(file "$OUTPUT_NAME")
+          EOF
+
+          echo "output_name=$OUTPUT_NAME" >> $GITHUB_OUTPUT
+          echo "info_name=$INFO_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload binary to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.prepare_release.outputs.release_tag }}" \
+            "${{ steps.output.outputs.output_name }}" \
+            "${{ steps.output.outputs.info_name }}" \
+            --clobber
+
+      - name: Summary
+        run: |
+          echo "## ✅ Binary Extract Complete (${{ matrix.arch }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Image | \`${{ env.IMAGE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture | ${{ matrix.arch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release Tag | \`${{ needs.prepare_release.outputs.release_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Output | \`${{ steps.output.outputs.output_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Binary uploaded to GitHub Release." >> $GITHUB_STEP_SUMMARY
+
